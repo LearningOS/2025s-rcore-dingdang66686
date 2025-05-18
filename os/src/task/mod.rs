@@ -135,6 +135,36 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// Get current task id
+    pub fn current_task(&self) -> usize {
+        let inner = self.inner.exclusive_access();
+        let id = inner.current_task;
+        drop(inner);
+        id
+    }
+    /// Increment current task syscall count
+    pub fn increment_syscall_stat(&self, id: usize) {
+        let task = self.current_task();
+        let mut inner = self.inner.exclusive_access();
+        inner.tasks[task].task_cx.increment_syscall_stat(id);
+        drop(inner);
+    }
+    /// Get current task syscall count
+    pub fn get_syscall_count(&self, id: usize) -> usize {
+        let task = self.current_task();
+        let inner = self.inner.exclusive_access();
+        let count = inner.tasks[task].task_cx.get_syscall_count(id);
+        drop(inner);
+        count
+    }
+    /// Get current task user stack
+    pub fn get_user_stack(&self, id: usize) -> usize {
+        let inner = self.inner.exclusive_access();
+        let stack_addr = inner.tasks[id].task_cx.get_user_stack();
+        drop(inner);
+        stack_addr
+    }
 }
 
 /// Run the first task in task list.
@@ -168,4 +198,21 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Get current task id
+pub fn get_current_task_id() -> usize {
+    TASK_MANAGER.current_task()
+}
+/// Increment current task syscall count
+pub fn increment_syscall_stat(id: usize) {
+    TASK_MANAGER.increment_syscall_stat(id)
+}
+/// Get current task syscall count
+pub fn get_syscall_count(id: usize) -> usize {
+    TASK_MANAGER.get_syscall_count(id)
+}
+/// Get current task user stack
+pub fn get_user_stack(id: usize) -> usize {
+    TASK_MANAGER.get_user_stack(id)
 }
