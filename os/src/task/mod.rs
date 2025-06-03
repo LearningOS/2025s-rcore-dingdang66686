@@ -158,49 +158,46 @@ impl TaskManager {
     /// Get current task id
     pub fn current_task(&self) -> usize {
         let inner = self.inner.exclusive_access();
-        let id = inner.current_task;
-        drop(inner);
-        id
+        inner.current_task
     }
     /// Increment current task syscall count
     pub fn increment_syscall_stat(&self, id: usize) {
         let task = self.current_task();
         let mut inner = self.inner.exclusive_access();
         inner.tasks[task].task_cx.increment_syscall_stat(id);
-        drop(inner);
     }
     /// Get current task syscall count
     pub fn get_syscall_count(&self, id: usize) -> usize {
         let task = self.current_task();
         let inner = self.inner.exclusive_access();
-        let count = inner.tasks[task].task_cx.get_syscall_count(id);
-        drop(inner);
-        count
+        inner.tasks[task].task_cx.get_syscall_count(id)
     }
     /// Get current task user stack
     pub fn get_user_stack(&self, id: usize) -> usize {
         let inner = self.inner.exclusive_access();
-        let stack_addr = inner.tasks[id].task_cx.get_user_stack();
-        drop(inner);
-        stack_addr
+        inner.tasks[id].task_cx.get_user_stack()
     }
     /// Map memory for current task
     pub fn current_task_map(&self, start_va: VirtAddr, end_va: VirtAddr, perm: MapPermission) -> Result<(), ()> {
         let task = self.current_task();
         let mut inner = self.inner.exclusive_access();
         let memory_set = &mut inner.tasks[task].memory_set;
-        let res = memory_set.map_area(start_va, end_va, perm);
-        drop(inner);
-        res
+        memory_set.map_area(start_va, end_va, perm)
     }
     /// Unmap memory for current task
     pub fn current_task_unmap(&self, ptr: VirtAddr) -> Result<usize, ()> {
         let task = self.current_task();
         let mut inner = self.inner.exclusive_access();
         let memory_set = &mut inner.tasks[task].memory_set;
-        let ret = memory_set.unmap_area(ptr);
-        drop(inner);
-        ret
+        memory_set.unmap_area(ptr)
+    }
+    /// Allocate a page for current task
+    pub fn current_task_do_pgfault(&self, addr: usize) -> Result<(), ()> {
+        let task = self.current_task();
+        let mut inner = self.inner.exclusive_access();
+        let va = VirtAddr::from(addr);
+        let memory_set = &mut inner.tasks[task].memory_set;
+        memory_set.do_pgfault(va)
     }
 }
 
@@ -275,4 +272,8 @@ pub fn current_task_map(start_va: VirtAddr, end_va: VirtAddr, perm: MapPermissio
 /// Unmap memory for current task
 pub fn current_task_unmap(ptr: VirtAddr) -> Result<usize, ()> {
     TASK_MANAGER.current_task_unmap(ptr)
+}
+/// Allocate a page for current task
+pub fn current_task_do_pgfault(addr: usize) -> Result<(), ()> {
+    TASK_MANAGER.current_task_do_pgfault(addr)
 }

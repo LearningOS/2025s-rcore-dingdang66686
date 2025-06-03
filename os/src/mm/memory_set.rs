@@ -72,7 +72,8 @@ impl MemorySet {
     }
     fn push_secure(&mut self, mut map_area: MapArea, data: Option<&[u8]>) -> Result<(), ()> {
         trace!("push_secure: {:?}", map_area.vpn_range);
-        map_area.map_secure(&mut self.page_table)?;
+        // map_area.map_secure(&mut self.page_table)?;
+        trace!("lazy map secure: {:?}", map_area.vpn_range);
         if let Some(data) = data {
             map_area.copy_data(&mut self.page_table, data);
         }
@@ -268,25 +269,27 @@ impl MemorySet {
             false
         }
     }
-/// Unmap area
-pub fn unmap_area(&mut self, ptr: VirtAddr) -> Result<usize, ()> {
-    // Find the index of the area with matching start address
-    let index = self.areas.iter().position(|area| {
-        area.vpn_range.get_start() == ptr.floor()
-    });
-    
-    if let Some(index) = index {
-        // Remove the area from the vector
-        let mut area = self.areas.remove(index);
+    /// Unmap area
+    pub fn unmap_area(&mut self, ptr: VirtAddr) -> Result<usize, ()> {
+        // Find the index of the area with matching start address
+        let index = self.areas.iter().position(|area| {
+            area.vpn_range.get_start() == ptr.floor()
+        });
         
-        // Calculate the length of the area in bytes
-        let length = (area.vpn_range.get_end().0 - area.vpn_range.get_start().0) * PAGE_SIZE;
-        area.shrink_to(&mut self.page_table, ptr.floor());
-        Ok(length)
-    } else {
-        Err(())
+        if let Some(index) = index {
+            // Remove the area from the vector
+            let mut area = self.areas.remove(index);
+            
+            // Calculate the length of the area in bytes
+            let length = (area.vpn_range.get_end().0 - area.vpn_range.get_start().0) * PAGE_SIZE;
+            if area.is_allocated == true {
+                area.unmap(&mut self.page_table);
+            }
+            Ok(length)
+        } else {
+            Err(())
+        }
     }
-}
     /// append the area to new_end
     #[allow(unused)]
     pub fn append_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> bool {
@@ -301,6 +304,19 @@ pub fn unmap_area(&mut self, ptr: VirtAddr) -> Result<usize, ()> {
             false
         }
     }
+    /// handle page fault
+    pub fn do_pgfault(&mut self, addr: VirtAddr) -> Result<(), ()> {
+        trace!("do_pgfault: addr = {:?}", addr);
+        let vpn = addr.floor();
+        // Find the area that contains the VPN
+        if let Some(area) = self.areas.iter_mut().find(|area| area.contains(vpn)) {
+            // Map the VPN in the area
+            area.map_secure(&mut self.page_table)?;
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
@@ -308,6 +324,7 @@ pub struct MapArea {
     data_frames: BTreeMap<VirtPageNum, FrameTracker>,
     map_type: MapType,
     map_perm: MapPermission,
+    is_allocated: bool,
 }
 
 impl MapArea {
@@ -324,6 +341,7 @@ impl MapArea {
             data_frames: BTreeMap::new(),
             map_type,
             map_perm,
+            is_allocated: false,
         }
     }
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
@@ -341,26 +359,26 @@ impl MapArea {
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
         page_table.map(vpn, ppn, pte_flags);
     }
-        pub fn map_one_secure(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> Result<(), ()> {
-            trace!("map_one_secure: {:?}", vpn);
-            let ppn: PhysPageNum;
-            match self.map_type {
-                MapType::Identical => {
-                    ppn = PhysPageNum(vpn.0);
-                }
-                MapType::Framed => {
-                    if let Some(_) = page_table.translate(vpn) {
-                        return Err(())
-                    }
-                    let frame = frame_alloc().unwrap();
-                    ppn = frame.ppn;
-                    self.data_frames.insert(vpn, frame);
-                }
+    pub fn map_one_secure(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> Result<(), ()> {
+        trace!("map_one_secure: {:?}", vpn);
+        let ppn: PhysPageNum;
+        match self.map_type {
+            MapType::Identical => {
+                ppn = PhysPageNum(vpn.0);
             }
-            let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
-            page_table.map(vpn, ppn, pte_flags);
-            Ok(())
+            MapType::Framed => {
+                if let Some(_) = page_table.translate(vpn) {
+                    return Err(())
+                }
+                let frame = frame_alloc().unwrap();
+                ppn = frame.ppn;
+                self.data_frames.insert(vpn, frame);
+            }
         }
+        let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+        page_table.map(vpn, ppn, pte_flags);
+        Ok(())
+    }
     #[allow(unused)]
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         trace!("unmap_one: {:?}", vpn);
@@ -373,11 +391,13 @@ impl MapArea {
         for vpn in self.vpn_range {
             self.map_one(page_table, vpn);
         }
+        self.is_allocated = true;
     }
     pub fn map_secure(&mut self, page_table: &mut PageTable) -> Result<(), ()> {
         for vpn in self.vpn_range {
             self.map_one_secure(page_table, vpn)?;
         }
+        self.is_allocated = true;
         Ok(())
     }
     #[allow(unused)]
@@ -385,6 +405,7 @@ impl MapArea {
         for vpn in self.vpn_range {
             self.unmap_one(page_table, vpn);
         }
+        self.is_allocated = false
     }
     #[allow(unused)]
     pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
@@ -404,6 +425,9 @@ impl MapArea {
     /// assume that all frames were cleared before
     pub fn copy_data(&mut self, page_table: &mut PageTable, data: &[u8]) {
         assert_eq!(self.map_type, MapType::Framed);
+        if self.is_allocated == false {
+            self.map(page_table);
+        }
         let mut start: usize = 0;
         let mut current_vpn = self.vpn_range.get_start();
         let len = data.len();
@@ -421,6 +445,9 @@ impl MapArea {
             }
             current_vpn.step();
         }
+    }
+    pub fn contains(&self, vpn: VirtPageNum) -> bool {
+        self.vpn_range.get_start() <= vpn && vpn <= self.vpn_range.get_end()
     }
 }
 

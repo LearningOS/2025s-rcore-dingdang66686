@@ -1,6 +1,7 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 
 use crate::config::PAGE_SIZE;
+use crate::task::current_task_do_pgfault;
 
 use super::{frame_alloc, FrameTracker, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 use alloc::vec;
@@ -185,17 +186,29 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     }
     v
 }
+/// Translate a virtual address to a page table entry, and handle page faults if necessary
+fn try_translate_with_pagefault(page_table: &mut PageTable, addr: usize) -> Option<PageTableEntry> {
+    let vpn = VirtAddr::from(addr).floor();
+    if let Some(pte) = page_table.translate(vpn) {
+        Some(pte)
+    } else {
+        // 手动触发 page fault 处理
+        current_task_do_pgfault(addr).ok()?;
+        // 处理后重试
+        page_table.translate(vpn)
+    }
+}
 
 /// 拷贝一个buf到用户空间的ptr[u8]数组
 pub fn copy_to_user(token: usize, ptr: *mut u8, buf: *mut u8, len: usize) -> isize {
-    let page_table = PageTable::from_token(token);
+    let mut page_table = PageTable::from_token(token);
     let mut start = ptr as usize;
     let mut buf_offset = 0;
     let end = start + len;
     while start < end {
         let start_va = VirtAddr::from(start);
-        let vpn = start_va.floor();
-        let ppn = page_table.translate(vpn).unwrap().ppn();
+        let pte = try_translate_with_pagefault(&mut page_table, ptr as usize);
+        let ppn = pte.unwrap().ppn();
         let page_offset = start_va.page_offset();
         let bytes_left_in_page = PAGE_SIZE - page_offset;
         let bytes_left_total = end - start;
@@ -210,9 +223,8 @@ pub fn copy_to_user(token: usize, ptr: *mut u8, buf: *mut u8, len: usize) -> isi
 
 /// read from user space address
 pub fn read_user_addr(token: usize, addr: usize) -> Result<u8, ()> {
-    let page_table = PageTable::from_token(token);
-    let vpn = VirtAddr::from(addr).floor();
-    if let Some(pte) = page_table.translate(vpn) {
+    let mut page_table = PageTable::from_token(token);
+    if let Some(pte) = try_translate_with_pagefault(&mut page_table, addr) {
         if pte.is_user() && pte.is_valid() && pte.readable() {
             debug!("read user addr: {:#x} -> {:#x}", addr, pte.ppn().get_bytes_array()[VirtAddr::from(addr).page_offset()]);
             debug!("pte flags: {:#x}", pte.flags().bits());
@@ -230,15 +242,10 @@ pub fn read_user_addr(token: usize, addr: usize) -> Result<u8, ()> {
 
 /// write to user space address
 pub fn write_user_addr(token: usize, addr: usize, value: u8) -> Result<(), ()> {
-    let page_table = PageTable::from_token(token);
-    let vpn = VirtAddr::from(addr).floor();
-    if let Some(pte) = page_table.translate(vpn) {
-        if pte.is_user() && pte.is_valid() && pte.writable() {
-            pte.ppn().get_bytes_array()[VirtAddr::from(addr).page_offset()] = value;
-            Ok(())
-        } else {
-            Err(())
-        }
+    let mut page_table = PageTable::from_token(token);
+    if let Some(pte) = try_translate_with_pagefault(&mut page_table, addr) && pte.is_user() && pte.is_valid() && pte.writable() {
+        pte.ppn().get_bytes_array()[VirtAddr::from(addr).page_offset()] = value;
+        Ok(())
     } else {
         Err(())
     }

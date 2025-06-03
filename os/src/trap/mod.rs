@@ -15,6 +15,7 @@
 mod context;
 
 use crate::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
+use crate::mm::do_pgfault;
 use crate::syscall::syscall;
 use crate::task::{
     current_trap_cx, current_user_token, exit_current_and_run_next, suspend_current_and_run_next,
@@ -72,8 +73,11 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::StorePageFault)
         | Trap::Exception(Exception::LoadFault)
         | Trap::Exception(Exception::LoadPageFault) => {
-            println!("[kernel] PageFault in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.", stval, cx.sepc);
-            exit_current_and_run_next();
+            trace!("[kernel] PageFault in application, addr = {:#x}, instruction = {:#x}.", stval, cx.sepc);
+            if let Err(_) = do_pgfault(stval) {
+                println!("[kernel] PageFault in application, kernel killed it.");
+                exit_current_and_run_next();
+            }
         }
         Trap::Exception(Exception::IllegalInstruction) => {
             println!("[kernel] IllegalInstruction in application, kernel killed it.");
