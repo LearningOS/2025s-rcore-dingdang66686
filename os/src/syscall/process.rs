@@ -2,12 +2,10 @@
 use alloc::sync::Arc;
 
 use crate::{
-    loader::get_app_data_by_name,
-    mm::{translated_refmut, translated_str},
-    task::{
+    config::PAGE_SIZE, loader::get_app_data_by_name, mm::{copy_to_user, translated_refmut, translated_str, MapPermission, VirtAddr}, task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next,
-    },
+        suspend_current_and_run_next, TaskControlBlock,
+    }, timer::get_time_us
 };
 
 #[repr(C)]
@@ -107,28 +105,94 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_get_time",
         current_task().unwrap().pid.0
     );
-    -1
+    let us = get_time_us();
+    let time_val = TimeVal {
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
+    };
+    copy_to_user(
+        current_user_token(),
+        _ts as *mut u8,
+        &time_val as *const TimeVal as *mut u8,
+        core::mem::size_of::<TimeVal>(),
+    );
+    0
 }
 
 /// YOUR JOB: Implement mmap.
 pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    trace!("kernel: sys_mmap");
+    if _port & !0x7 != 0 || _port & 0x7 == 0 {
+        error!("Bad permission bits");
+        return -1;
+    }
+    let start_va = VirtAddr::from(_start);
+    if start_va.page_offset() != 0 {
+        error!("Address must be page-aligned");
+        return -1
+    }
+
+    if _len == 0 {
+        error!("Length must be greater than 0");
+        return -1;
+    }
+
+    let _len = if _len % PAGE_SIZE != 0 {
+        (_len + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE
+    } else {
+        _len
+    };
+
+    let end_va = VirtAddr::from(_start + _len - 1);
+
+    let mut perm = MapPermission::U;
+    if _port & 0x1 != 0 {
+        perm |= MapPermission::R;
+    }
+    if _port & 0x2 != 0 {
+        perm |= MapPermission::W;
+    }
+    if _port & 0x4 != 0 {
+        perm |= MapPermission::X;
+    }
+
+    match current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .memory_set
+        .map_area(start_va, end_va, perm) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
 }
 
 /// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_munmap(_start: usize, mut _len: usize) -> isize {
+    fn current_task_unmap(ptr: VirtAddr) -> Result<usize, ()> {
+        current_task()
+            .unwrap()
+            .inner_exclusive_access()
+            .memory_set
+            .unmap_area(ptr)
+    }
+    trace!("kernel: sys_munmap");
+    while _len > 0 {
+        if let Ok(cnt) = current_task_unmap(VirtAddr::from(_start)) {
+            _len = if _len >= cnt {
+                _len - cnt
+            } else { 
+                warn!("kernel: sys_munmap: _len({}) < cnt({}), this should not happen", _len, cnt);
+                0
+             }
+
+        } else {
+            return -1;
+        }
+    }
+    0
 }
 
 /// change data segment size
@@ -145,17 +209,35 @@ pub fn sys_sbrk(size: i32) -> isize {
 /// HINT: fork + exec =/= spawn
 pub fn sys_spawn(_path: *const u8) -> isize {
     trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_spawn",
         current_task().unwrap().pid.0
     );
-    -1
+    let token = current_user_token();
+    let path = translated_str(token, _path);
+    if let Some(data) = get_app_data_by_name(path.as_str()) {
+        let task = Arc::new(TaskControlBlock::new(data));
+        let pid = task.pid.0;
+        task.exec(data);
+        task.inner_exclusive_access().parent = Some(Arc::downgrade(&current_task().unwrap()));
+        current_task()
+            .unwrap()
+            .inner_exclusive_access()
+            .children
+            .push(task.clone());
+        add_task(task);
+        pid as isize
+    } else {
+        -1
+    }
 }
 
 // YOUR JOB: Set task priority.
 pub fn sys_set_priority(_prio: isize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_set_priority",
         current_task().unwrap().pid.0
     );
-    -1
+    if _prio < 2 || _prio > 256 { return -1; }
+    current_task().unwrap().inner_exclusive_access().prio = _prio as usize;
+    _prio
 }
