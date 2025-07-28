@@ -276,3 +276,24 @@ impl Iterator for UserBufferIterator {
         }
     }
 }
+/// 拷贝一个buf到用户空间的ptr[u8]数组
+pub fn copy_to_user(token: usize, ptr: *mut u8, buf: *mut u8, len: usize) -> isize {
+    let page_table = PageTable::from_token(token);
+    let mut start = ptr as usize;
+    let mut buf_offset = 0;
+    let end = start + len;
+    while start < end {
+        let start_va = VirtAddr::from(start);
+        let vpn = start_va.floor();
+        let ppn = page_table.translate(vpn).unwrap().ppn();
+        let page_offset = start_va.page_offset();
+        let bytes_left_in_page = crate::config::PAGE_SIZE - page_offset;
+        let bytes_left_total = end - start;
+        let copy_len = bytes_left_in_page.min(bytes_left_total);
+        ppn.get_bytes_array()[page_offset..page_offset + copy_len]
+            .copy_from_slice(unsafe { core::slice::from_raw_parts(buf.add(buf_offset), copy_len) });
+        start += copy_len;
+        buf_offset += copy_len;
+    }
+    0
+}
